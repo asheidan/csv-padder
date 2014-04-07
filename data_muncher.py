@@ -19,11 +19,13 @@ def datetime_from_fields(fields):
     return timestamp
 
 
-def write_pad_rows_until_date(from_timestamp, to_timestamp, delta, csvwriter):
+def write_pad_rows_until_date(from_timestamp, to_timestamp, deltas, counter, csvwriter):
+    print("Gap detected: %s -> %s" % (from_timestamp, to_timestamp))
     current_timestamp = from_timestamp
     while current_timestamp < to_timestamp:
         csvwriter.writerow((current_timestamp, None, None))
-        current_timestamp = current_timestamp + delta
+        current_timestamp = current_timestamp + deltas[counter % len(deltas)]
+        counter += 1
 
 
 start_timestamp = datetime(1961, 1, 1)
@@ -35,6 +37,8 @@ csv.register_dialect('mikaeldata', delimiter=';', quoting=csv.QUOTE_MINIMAL)
 for file_name in argv[1:]:
     stderr.write("%s\n" % file_name)
 
+    row_counter = 0
+
     with open(file_name) as csvfile:
         # Create a csv reader which reads from the opened file
         headers = None
@@ -45,22 +49,35 @@ for file_name in argv[1:]:
                 headers = row
                 break
 
-        # Let's assume that the two first measurements are consequtive
-        row_1 = csvreader.next()
-        row_2 = csvreader.next()
+        # Read datapoints from the first 24 hours
+        initial_rows = []
+        initial_rows.append(csvreader.next())
+        initial_rows.append(csvreader.next())
 
-        datetime_1 = datetime_from_fields(row_1)
-        datetime_2 = datetime_from_fields(row_2)
+        initial_timestamps = [datetime_from_fields(r) for r in initial_rows]
 
-        # Get the difference between measurements
-        delta = datetime_2 - datetime_1
-        print delta
+        while initial_timestamps[0].date() == initial_timestamps[-1].date():
+            row = csvreader.next()
+            initial_rows.append(row)
+            initial_timestamps.append(datetime_from_fields(row))
+
+        delta_pattern = [ b - a for a,b in zip(initial_timestamps[0:-1],initial_timestamps[1:])]
+
+        """ Iterate over the timedeltas at the same time as the datarows. As
+            long as every day follows the same pattern it should all work out in
+            the end.
+        """
         
         # Try to handle the different kind of datafiles
-        if datetime_1.time() == time(6, 0):
+        if initial_timestamps[0].time() == time(6, 0):
+            print("First timestamp is at 06:00")
             current_timestamp = start_timestamp + timedelta(hours=6)
         else:
             current_timestamp = start_timestamp
+
+        print("Deltas")
+        for d in delta_pattern:
+            print("   %s" % d)
 
         output_filename = 'Padded Data/%s' % file_name
 
@@ -77,23 +94,29 @@ for file_name in argv[1:]:
                 csvwriter.writerow([headers[i] for i in [0,2,3]])
 
             # Write the previous read rows
-            write_pad_rows_until_date(current_timestamp, datetime_1, delta,
-                                      csvwriter)
-            csvwriter.writerow((datetime_1, float(row_1[2]), row_1[3]))
-            csvwriter.writerow((datetime_2, float(row_2[2]), row_2[3]))
+            write_pad_rows_until_date(current_timestamp, initial_timestamps[0],
+                                      delta_pattern, row_counter, csvwriter)
+            for row in initial_rows:
+                current_timestamp = datetime_from_fields(row)
+                csvwriter.writerow((current_timestamp, float(row[2]), row[3]))
+                row_counter += 1
+
+            print("Initial rows over at: %s" % current_timestamp)
 
             # Write the rest of the rows
-            current_timestamp = datetime_2 + delta
             for row in csvreader:
+                current_timestamp = current_timestamp + delta_pattern[row_counter % len(delta_pattern)]
                 row_timestamp = datetime_from_fields(row)
                 value = float(row[2])
                 quality = row[3]
-                write_pad_rows_until_date(current_timestamp, row_timestamp,
-                                          delta, csvwriter)
+                if current_timestamp < row_timestamp:
+                    write_pad_rows_until_date(current_timestamp, row_timestamp,
+                                            delta_pattern, row_counter, csvwriter)
+                    current_timestamp = row_timestamp
 
                 csvwriter.writerow((row_timestamp, value, quality))
 
-                current_timestamp = row_timestamp + delta
+                row_counter += 1
 
-            write_pad_rows_until_date(current_timestamp, end_timestamp, delta,
-                                      csvwriter)
+            write_pad_rows_until_date(current_timestamp, end_timestamp,
+                                      delta_pattern, row_counter, csvwriter)
